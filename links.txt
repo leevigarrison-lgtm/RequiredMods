@@ -1,0 +1,34 @@
+This lists all of the mods installed in the essential and full version of the executable.
+
+.Essentials
+
+Fabric Installer - https://fabricmc.net/use/installer/
+Fabric API - https://modrinth.com/mod/fabric-api
+Cloth Config API - https://modrinth.com/mod/cloth-config
+Silk (API) - https://modrinth.com/mod/silk
+Fabric Language Kotlin - https://modrinth.com/mod/fabric-language-kotlin\
+enchant-overhaul - Personal Mod, will include link to Github in later version.
+
+.Full (recommended version)
+
+Fabric Installer - https://fabricmc.net/use/installer/
+Fabric API - https://modrinth.com/mod/fabric-api
+Cloth Config API - https://modrinth.com/mod/cloth-config
+Silk (API) - https://modrinth.com/mod/silk
+Fabric Language Kotlin - https://modrinth.com/mod/fabric-language-kotlin\
+enchant-overhaul - Personal Mod, will include link to Github in later version.
+MezzConfig - https://modrinth.com/mod/mezzconfig
+Yet Another Config Library (YACL) - https://modrinth.com/mod/yacl
+Xaero's Minimap - https://modrinth.com/mod/xaeros-minimap
+Xaero's World Map - https://modrinth.com/mod/xaeros-world-map
+Just Enough Items - https://modrinth.com/mod/jei
+AppleSkin - https://modrinth.com/mod/appleskin
+ECL (Easy Chunk Loader) - https://modrinth.com/datapack/ecl?version=1.21.11&loader=fabric
+VeinMiner - https://modrinth.com/datapack/veinminer
+Sodium - https://modrinth.com/mod/sodium
+Zoomify - https://modrinth.com/mod/zoomify
+Iris - https://modrinth.com/mod/iris
+Mod Menu - https://modrinth.com/mod/modmenu
+Sound Physics Remastered - https://modrinth.com/mod/sound-physics-remastered
+Visuality - https://modrinth.com/mod/visuality?version=1.21.11&loader=fabric
+
