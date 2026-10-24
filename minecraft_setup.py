@@ -1,8 +1,9 @@
 """Minecraft Server Client Setup.
 
 A small GUI installer that makes sure Fabric for Minecraft 1.21.11 is installed
-(with a launcher profile) and copies the chosen mod pack into the user's
-.minecraft\\mods folder, moving any existing mod jars into old_mods first.
+(with a launcher profile), downloads the chosen mod pack from GitHub, and puts
+it in the user's .minecraft\\mods folder, moving any existing mod jars into
+old_mods first.
 """
 
 import datetime
@@ -12,10 +13,12 @@ import queue
 import re
 import shutil
 import subprocess
-import sys
+import tempfile
 import threading
 import tkinter as tk
+import urllib.error
 import urllib.request
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -25,7 +28,11 @@ PROFILE_KEY = f"fabric-loader-{MC_VERSION}"
 PROFILE_NAME = f"Fabric {MC_VERSION}"
 FABRIC_META = "https://meta.fabricmc.net/v2/versions/loader"
 
-# Dropdown label -> folder inside Mods\ next to the program.
+GITHUB_REPO = "leevigarrison-lgtm/RequiredMods"
+GITHUB_BRANCH = "main"
+REPO_URL = f"https://github.com/{GITHUB_REPO}"
+
+# Dropdown label -> folder inside Mods/ in the GitHub repo.
 PACKS = {
     "Download Full": ".Full",
     "Download Essential": ".Essentials",
@@ -46,29 +53,12 @@ class SetupError(Exception):
 
 # ---------------------------------------------------------------- paths
 
-def app_dir() -> Path:
-    """Folder containing the exe (or this script when run from source)."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
-
-
 def minecraft_dir() -> Path:
     # MC_SETUP_MINECRAFT_DIR lets the installer be tested against a scratch folder.
     override = os.environ.get("MC_SETUP_MINECRAFT_DIR")
     if override:
         return Path(override)
     return Path(os.environ["APPDATA"]) / ".minecraft"
-
-
-def pack_source(pack_label: str) -> Path:
-    folder = app_dir() / "Mods" / PACKS[pack_label]
-    if not folder.is_dir() or not any(folder.iterdir()):
-        raise SetupError(
-            f"Could not find any mods in:\n{folder}\n\n"
-            "Make sure the Mods folder is next to this program."
-        )
-    return folder
 
 
 # ---------------------------------------------------------------- processes
@@ -133,17 +123,36 @@ def _write_json(path: Path, data):
     os.replace(tmp, path)
 
 
-def _http_json(url: str):
+def _open_url(url: str):
     request = urllib.request.Request(
         url, headers={"User-Agent": "MinecraftServerClientSetup/1.0"})
+    return urllib.request.urlopen(request, timeout=30)
+
+
+def _download_error(what: str, url: str, exc: Exception) -> SetupError:
+    if isinstance(exc, urllib.error.HTTPError) and exc.code in (403, 429):
+        return SetupError(
+            f"Could not download {what}: the server is rate limiting requests.\n\n"
+            "Wait a while (up to an hour) and try again.")
+    return SetupError(
+        f"Could not download {what} from:\n{url}\n\n"
+        f"Check your internet connection and try again.\n\n{exc}")
+
+
+def _http_json(url: str, what: str):
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _open_url(url) as response:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError) as exc:
-        raise SetupError(
-            f"Could not download Fabric from:\n{url}\n\n"
-            f"Check your internet connection and try again.\n\n{exc}"
-        ) from exc
+        raise _download_error(what, url, exc) from exc
+
+
+def _download_file(url: str, target: Path, what: str):
+    try:
+        with _open_url(url) as response, open(target, "wb") as out:
+            shutil.copyfileobj(response, out)
+    except OSError as exc:
+        raise _download_error(what, url, exc) from exc
 
 
 def _version_key(version: str):
@@ -173,14 +182,14 @@ def install_fabric(mc_dir: Path) -> str:
     json from Fabric's meta server into versions\\<id>\\. The launcher downloads
     vanilla Minecraft and Fabric's libraries itself on first launch.
     """
-    loaders = _http_json(f"{FABRIC_META}/{MC_VERSION}")
+    loaders = _http_json(f"{FABRIC_META}/{MC_VERSION}", "Fabric")
     stable = [entry["loader"]["version"] for entry in loaders
               if entry.get("loader", {}).get("stable")]
     if not stable:
         raise SetupError(f"Fabric has no stable loader for Minecraft {MC_VERSION}.")
     loader = max(stable, key=_version_key)
 
-    profile = _http_json(f"{FABRIC_META}/{MC_VERSION}/{loader}/profile/json")
+    profile = _http_json(f"{FABRIC_META}/{MC_VERSION}/{loader}/profile/json", "Fabric")
     version_id = profile.get("id") or f"fabric-loader-{loader}-{MC_VERSION}"
     version_dir = mc_dir / "versions" / version_id
     try:
@@ -230,6 +239,26 @@ def ensure_profile(mc_dir: Path, version_ids: list) -> bool:
 
 # ---------------------------------------------------------------- mods
 
+def download_pack(pack_label: str, dest: Path) -> Path:
+    """Download every file in Mods/<pack> of the GitHub repo into dest."""
+    folder = PACKS[pack_label]
+    listing = _http_json(
+        f"https://api.github.com/repos/{GITHUB_REPO}/contents/Mods/{folder}"
+        f"?ref={GITHUB_BRANCH}",
+        "the mod list")
+    files = [entry for entry in (listing if isinstance(listing, list) else [])
+             if entry.get("type") == "file" and entry.get("download_url")]
+    if not files:
+        raise SetupError(f"No mods were found on GitHub in Mods/{folder}:\n{REPO_URL}")
+
+    for entry in files:
+        target = dest / entry["name"]
+        _download_file(entry["download_url"], target, entry["name"])
+        if entry.get("size") is not None and target.stat().st_size != entry["size"]:
+            raise SetupError(f"{entry['name']} didn't download completely. Please try again.")
+    return dest
+
+
 def install_mods(mc_dir: Path, source: Path):
     """Move existing top-level jars into old_mods, then copy the pack in.
 
@@ -268,7 +297,7 @@ def install_mods(mc_dir: Path, source: Path):
 
 # ---------------------------------------------------------------- orchestration
 
-def run_setup(source: Path, report=lambda message: None) -> str:
+def run_setup(pack_label: str, report=lambda message: None) -> str:
     """Do the whole install and return a summary for the user."""
     mc_dir = minecraft_dir()
     if not mc_dir.is_dir():
@@ -277,23 +306,28 @@ def run_setup(source: Path, report=lambda message: None) -> str:
             "Install the Minecraft Launcher and open it once, then try again."
         )
 
-    report("Checking for Fabric...")
-    lines = []
-    versions = installed_fabric_versions(mc_dir)
-    if versions:
-        lines.append(f"Fabric for Minecraft {MC_VERSION} is already installed.")
-    else:
-        report(f"Installing Fabric for Minecraft {MC_VERSION}...")
-        version_id = install_fabric(mc_dir)
+    # Download everything first so a failed download leaves Minecraft untouched.
+    with tempfile.TemporaryDirectory(prefix="mc-setup-") as staging:
+        report("Downloading mods from GitHub...")
+        source = download_pack(pack_label, Path(staging))
+
+        report("Checking for Fabric...")
+        lines = []
         versions = installed_fabric_versions(mc_dir)
-        lines.append(f"Installed Fabric ({version_id}).")
+        if versions:
+            lines.append(f"Fabric for Minecraft {MC_VERSION} is already installed.")
+        else:
+            report(f"Installing Fabric for Minecraft {MC_VERSION}...")
+            version_id = install_fabric(mc_dir)
+            versions = installed_fabric_versions(mc_dir)
+            lines.append(f"Installed Fabric ({version_id}).")
 
-    report("Updating launcher profile...")
-    if ensure_profile(mc_dir, versions):
-        lines.append(f'Created the "{PROFILE_NAME}" profile in the Minecraft Launcher.')
+        report("Updating launcher profile...")
+        if ensure_profile(mc_dir, versions):
+            lines.append(f'Created the "{PROFILE_NAME}" profile in the Minecraft Launcher.')
 
-    report("Copying mods...")
-    copied, backup_dir = install_mods(mc_dir, source)
+        report("Copying mods...")
+        copied, backup_dir = install_mods(mc_dir, source)
     lines.append(f"Copied {copied} mods into:\n{mc_dir / 'mods'}")
     if backup_dir:
         lines.append(f"Your previous mods were moved to:\n{backup_dir}")
@@ -326,6 +360,15 @@ class SetupApp:
         self.button = ttk.Button(frame, text="Download", command=self.on_download)
         self.button.pack(fill="x", ipady=4)
 
+        link_row = ttk.Frame(frame)
+        link_row.pack(anchor="w", pady=(16, 0))
+        ttk.Label(link_row, text="Open Source Code:").pack(side="left")
+        link = ttk.Label(link_row, text=REPO_URL.removeprefix("https://"),
+                         foreground="#0066cc", cursor="hand2",
+                         font=("Segoe UI", 9, "underline"))
+        link.pack(side="left", padx=(4, 0))
+        link.bind("<Button-1>", lambda _event: webbrowser.open(REPO_URL))
+
         root.update_idletasks()
         x = (root.winfo_screenwidth() - root.winfo_width()) // 2
         y = (root.winfo_screenheight() - root.winfo_height()) // 3
@@ -337,12 +380,7 @@ class SetupApp:
         self.combo.configure(state="disabled" if busy else "readonly")
 
     def on_download(self):
-        try:
-            source = pack_source(self.pack_var.get())
-        except SetupError as exc:
-            messagebox.showerror(APP_TITLE, str(exc))
-            return
-
+        pack_label = self.pack_var.get()
         self.set_busy(True)
         self.root.update()
         while True:
@@ -356,12 +394,12 @@ class SetupApp:
                 self.set_busy(False)
                 return
 
-        threading.Thread(target=self.worker, args=(source,), daemon=True).start()
+        threading.Thread(target=self.worker, args=(pack_label,), daemon=True).start()
         self.root.after(100, self.poll)
 
-    def worker(self, source: Path):
+    def worker(self, pack_label: str):
         try:
-            self.events.put(("done", run_setup(source)))
+            self.events.put(("done", run_setup(pack_label)))
         except SetupError as exc:
             self.events.put(("error", str(exc)))
         except Exception as exc:  # noqa: BLE001 - always tell the user something
